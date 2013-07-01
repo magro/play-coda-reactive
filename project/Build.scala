@@ -18,6 +18,7 @@ object ApplicationBuild extends Build {
     val main = play.Project(appName, appVersion, appDependencies).settings(
       // Add your own project settings here  
       // resolvers += Resolver.file("localIvy", file(Path.userHome.absolutePath + "/.ivy2/local"))(Resolver.ivyStylePatterns)
+      resolvers += Resolver.url("magro github ivy repo", url("http://magro.github.io/releases/"))(Resolver.ivyStylePatterns)
     )
 
 }
