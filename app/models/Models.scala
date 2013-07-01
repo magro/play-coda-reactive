@@ -1,15 +1,19 @@
 package models
 
-import java.util.{Date}
-
+import java.util.{ Date }
 import play.api.db._
 import play.api.Play.current
-
 import anorm._
 import anorm.SqlParser._
+import scala.concurrent.Future
+import com.github.mauricio.async.db.{ RowData, Connection }
+import com.github.mauricio.async.db.util.ExecutorServiceUtils.CachedExecutionContext
+import play.api.libs.concurrent.Promise
+import org.joda.time.DateTime
+import org.joda.time.LocalDate
 
-case class Company(id: Pk[Long] = NotAssigned, name: String)
-case class Computer(id: Pk[Long] = NotAssigned, name: String, introduced: Option[Date], discontinued: Option[Date], companyId: Option[Long])
+case class Company(id: Option[Long] = None, name: String)
+case class Computer(id: Option[Long] = None, name: String, introduced: Option[Date], discontinued: Option[Date], companyId: Option[Long])
 
 /**
  * Helper for pagination.
@@ -19,41 +23,55 @@ case class Page[A](items: Seq[A], page: Int, offset: Long, total: Long) {
   lazy val next = Option(page + 1).filter(_ => (offset + items.size) < total)
 }
 
-object Computer {
+object ComputerRepository {
+
+  private def simple(row: RowData): Computer = {
+    Computer(
+      id = Some(row("id").asInstanceOf[Long]),
+      name = row("name").asInstanceOf[String],
+      introduced = Option(row("introduced").asInstanceOf[LocalDate]).map(_.toDate()),
+      discontinued = Option(row("discontinued").asInstanceOf[LocalDate]).map(_.toDate()),
+      companyId = Option(row("company_id").asInstanceOf[Long]))
+  }
+
+  private def withCompany(row: RowData): (Computer, Option[Company]) = {
+    (simple(row), Option(Company.simple(row)))
+  }
+
+}
+
+class ComputerRepository(pool: Connection) {
+
+  import ComputerRepository._
+
+  // -- Generic Queries
   
-  // -- Parsers
-  
-  /**
-   * Parse a Computer from a ResultSet
-   */
-  val simple = {
-    get[Pk[Long]]("computer.id") ~
-    get[String]("computer.name") ~
-    get[Option[Date]]("computer.introduced") ~
-    get[Option[Date]]("computer.discontinued") ~
-    get[Option[Long]]("computer.company_id") map {
-      case id~name~introduced~discontinued~companyId => Computer(id, name, introduced, discontinued, companyId)
+  def findOne[T](stmt: String, params: Seq[Any] = List(), mapper: (RowData) => T): Future[Option[T]] = {
+    pool.sendPreparedStatement(stmt, params).map {
+      _.rows.map(rs => mapper(rs(0)))
     }
   }
   
-  /**
-   * Parse a (Computer,Company) from a ResultSet
-   */
-  val withCompany = Computer.simple ~ (Company.simple ?) map {
-    case computer~company => (computer,company)
+  def find[T](stmt: String, params: Seq[Any] = List(), mapper: (RowData) => T): Future[IndexedSeq[T]] = {
+    pool.sendPreparedStatement(stmt, params).map(_.rows.get.map(item => mapper(item)))
   }
   
+  /**
+   * Expects a query that returns the count as first column of the resulting row.
+   */
+  def count[T](stmt: String, params: Seq[Any] = List()): Future[Long] = {
+    pool.sendPreparedStatement(stmt, params).map(_.rows.get(0)(0).asInstanceOf[Long])
+  }
+
   // -- Queries
-  
+
   /**
    * Retrieve a computer from the id.
    */
-  def findById(id: Long): Option[Computer] = {
-    DB.withConnection { implicit connection =>
-      SQL("select * from computer where id = {id}").on('id -> id).as(Computer.simple.singleOpt)
-    }
+  def findById(id: Long): Future[Option[Computer]] = {
+    findOne("select * from computer where id = ?", Array(id), simple)
   }
-  
+
   /**
    * Return a page of (Computer,Company).
    *
@@ -62,43 +80,43 @@ object Computer {
    * @param orderBy Computer property used for sorting
    * @param filter Filter applied on the name column
    */
-  def list(page: Int = 0, pageSize: Int = 10, orderBy: Int = 1, filter: String = "%"): Page[(Computer, Option[Company])] = {
-    
-    val offest = pageSize * page
-    
-    DB.withConnection { implicit connection =>
-      
-      val computers = SQL(
-        """
-          select * from computer 
-          left join company on computer.company_id = company.id
-          where computer.name like {filter}
-          order by {orderBy} nulls last
-          limit {pageSize} offset {offset}
-        """
-      ).on(
-        'pageSize -> pageSize, 
-        'offset -> offest,
-        'filter -> filter,
-        'orderBy -> orderBy
-      ).as(Computer.withCompany *)
+  def list(page: Int = 0, pageSize: Int = 10, orderBy: Int = 1, filter: String = "%"): Future[Page[(Computer, Option[Company])]] = {
 
-      val totalRows = SQL(
-        """
-          select count(*) from computer 
-          left join company on computer.company_id = company.id
-          where computer.name like {filter}
-        """
-      ).on(
-        'filter -> filter
-      ).as(scalar[Long].single)
+    val offset = pageSize * page
 
-      Page(computers, page, offest, totalRows)
+    // order manually, see e.g. http://stackoverflow.com/questions/9778185/anorm-broken-in-postgresql-9-0-selects-with-order-by
+    val order = if (orderBy > 0) "asc" else "desc"
+
+    val computers = find(
+      """
+        select computer.*, company.id as comp_id, company.name as comp_name
+        from computer left join company on computer.company_id = company.id
+        where computer.name like ?
+        order by %d %s nulls last
+        limit ? offset ?
+      """.format(scala.math.abs(orderBy), order),
+      Array[Any](filter, pageSize, offset),
+      withCompany)
+
+    val totalRows = count(
+      """
+        select count(*) from computer 
+        left join company on computer.company_id = company.id
+        where computer.name like ?
+      """,
+      Array[Any](filter)
+    )
       
-    }
-    
+    for {
+      comps <- computers;
+      rows  <- totalRows
+    } yield Page(comps, page, offset, rows)
+
+    // As alternative to for comprehension:
+//    computers.flatMap(c => totalRows.map(t => Page(c, page, offset, t)))
+
   }
-  
+
   /**
    * Update a computer.
    *
@@ -106,77 +124,87 @@ object Computer {
    * @param computer The computer values.
    */
   def update(id: Long, computer: Computer) = {
-    DB.withConnection { implicit connection =>
-      SQL(
-        """
-          update computer
-          set name = {name}, introduced = {introduced}, discontinued = {discontinued}, company_id = {company_id}
-          where id = {id}
-        """
-      ).on(
-        'id -> id,
-        'name -> computer.name,
-        'introduced -> computer.introduced,
-        'discontinued -> computer.discontinued,
-        'company_id -> computer.companyId
-      ).executeUpdate()
-    }
+    pool.sendPreparedStatement(
+      """
+        update computer
+        set name = ?, introduced = ?, discontinued = ?, company_id = ?
+        where id = ?
+      """, Array(computer.name, computer.introduced, computer.discontinued, computer.companyId, id)
+    ).map(_.rowsAffected)
   }
-  
+
   /**
    * Insert a new computer.
    *
    * @param computer The computer values.
    */
   def insert(computer: Computer) = {
-    DB.withConnection { implicit connection =>
-      SQL(
-        """
-          insert into computer values (
-            (select next value for computer_seq), 
-            {name}, {introduced}, {discontinued}, {company_id}
-          )
-        """
-      ).on(
-        'name -> computer.name,
-        'introduced -> computer.introduced,
-        'discontinued -> computer.discontinued,
-        'company_id -> computer.companyId
-      ).executeUpdate()
+    pool.sendPreparedStatement(
+      """
+        insert into computer values (
+          (select nextval('computer_seq')),
+          ?, ?, ?, ?
+        )
+      """, Array(
+        computer.name,
+        computer.introduced.map(LocalDate.fromDateFields(_)),
+        computer.discontinued.map(LocalDate.fromDateFields(_)),
+        computer.companyId)
+    ).map {
+      queryResult => computer.copy(id = Some(queryResult.rows.get(0)("id").asInstanceOf[Long]))
     }
   }
-  
+
   /**
    * Delete a computer.
    *
    * @param id Id of the computer to delete.
    */
   def delete(id: Long) = {
-    DB.withConnection { implicit connection =>
-      SQL("delete from computer where id = {id}").on('id -> id).executeUpdate()
-    }
+    pool.sendPreparedStatement("delete from computer where id = ?", Array(id)).map(_.rowsAffected)
   }
   
+  private def withTransaction[T](f: (Connection) => Future[T]): Future[T] = {
+    pool.connect.flatMap { connection =>
+      connection.sendQuery("BEGIN TRANSACTION")
+      try {
+        val res = f(connection)
+        connection.sendQuery("COMMIT")
+        res
+      } catch {
+        case e: Exception => {
+          connection.sendQuery("ROLLBACK")
+          throw e
+        }
+      }
+    }
+  }
+
 }
 
 object Company {
-    
-  /**
-   * Parse a Company from a ResultSet
-   */
-  val simple = {
-    get[Pk[Long]]("company.id") ~
-    get[String]("company.name") map {
-      case id~name => Company(id, name)
-    }
+
+  private[models] def simple(row: RowData): Company = {
+    Company(
+      id = Some(row("comp_id").asInstanceOf[Long]),
+      name = row("comp_name").asInstanceOf[String])
   }
-  
+
+}
+
+class CompanyRepository(pool: Connection) {
+
   /**
    * Construct the Map[String,String] needed to fill a select options set.
    */
-  def options: Seq[(String,String)] = DB.withConnection { implicit connection =>
-    SQL("select * from company order by name").as(Company.simple *).map(c => c.id.toString -> c.name)
+  def options: Future[Seq[(String, String)]] = {
+    pool.sendQuery("select id, name from company order by name").map {
+      queryResult =>
+        queryResult.rows.get.map {
+          row => row("id").asInstanceOf[Long].toString -> row("name").asInstanceOf[String]
+        }
+    }
   }
-  
+
 }
 
