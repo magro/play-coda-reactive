@@ -12,13 +12,14 @@ object ApplicationBuild extends Build {
     	anorm,
     	// for evolutions
     	"postgresql" % "postgresql" % "9.1-901-1.jdbc4",
-        "com.github.mauricio" %% "postgresql-async" % "0.2.3.1"
+        "com.github.mauricio" %% "postgresql-async" % "0.2.3.2"
     )
 
     val main = play.Project(appName, appVersion, appDependencies).settings(
       // Add your own project settings here  
       // resolvers += Resolver.file("localIvy", file(Path.userHome.absolutePath + "/.ivy2/local"))(Resolver.ivyStylePatterns)
-      resolvers += Resolver.url("magro github ivy repo", url("http://magro.github.io/releases/"))(Resolver.ivyStylePatterns)
+      resolvers += Resolver.url("magro github ivy repo", url("http://magro.github.io/releases/"))(Resolver.ivyStylePatterns),
+      resolvers += Resolver.url("magro github ivy repo", url("http://magro.github.io/snapshots/"))(Resolver.ivyStylePatterns)
     )
 
 }
