@@ -2,6 +2,7 @@
 
 This is a [Play 2.1 scala](http://www.playframework.com/documentation/2.1.x/ScalaHome) CRUD application (based on the [computer database sample](https://github.com/playframework/Play20/tree/master/samples/scala/computer-database))
 to demonstrate async, non-blocking database access using the [postgresql-async driver](https://github.com/mauricio/postgresql-async) (instead of [anorm](http://www.playframework.com/documentation/2.1.x/ScalaAnorm), which is used by the original sample).
+The app is [live on heroku](http://play-coda-reactive.herokuapp.com/computers).
 
 What's changed to replace anorm with postgresql-async is contained in [commit 764d3e33](../../commit/764d3e33).
 
