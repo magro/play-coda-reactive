@@ -25,7 +25,7 @@ case class Page[A](items: Seq[A], page: Int, offset: Long, total: Long) {
 
 object ComputerRepository {
 
-  private def simple(row: RowData): Computer = {
+  private def rowMapper(row: RowData): Computer = {
     Computer(
       id = Some(row("id").asInstanceOf[Long]),
       name = row("name").asInstanceOf[String],
@@ -35,7 +35,7 @@ object ComputerRepository {
   }
 
   private def withCompany(row: RowData): (Computer, Option[Company]) = {
-    (simple(row), Option(Company.simple(row)))
+    (rowMapper(row), Option(Company.simple(row)))
   }
 
 }
@@ -69,7 +69,7 @@ class ComputerRepository(pool: Connection) {
    * Retrieve a computer from the id.
    */
   def findById(id: Long): Future[Option[Computer]] = {
-    findOne("select * from computer where id = ?", Array(id), simple)
+    findOne("select * from computer where id = ?", Array(id), rowMapper)
   }
 
   /**
