@@ -2,6 +2,8 @@
 
 # --- !Ups
 
+set ignorecase true;
+
 create table company (
   id                        bigint not null,
   name                      varchar(255) not null,
@@ -11,8 +13,8 @@ create table company (
 create table computer (
   id                        bigint not null,
   name                      varchar(255) not null,
-  introduced                date,
-  discontinued              date,
+  introduced                timestamp,
+  discontinued              timestamp,
   company_id                bigint,
   constraint pk_computer primary key (id))
 ;
