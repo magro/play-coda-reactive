@@ -4,11 +4,12 @@ import play.api._
 import play.api.mvc._
 import play.api.data._
 import play.api.data.Forms._
-
 import anorm._
-
 import views._
 import models._
+import scala.concurrent.Future
+import scala.concurrent.ExecutionContext.Implicits.global
+import java.util.Date
 
 /**
  * Manage a database of computers
@@ -22,10 +23,10 @@ object Application extends Controller {
   
   /**
    * Describe the computer form (used in both edit and create screens).
-   */ 
+   */
   val computerForm = Form(
     mapping(
-      "id" -> ignored(NotAssigned:Pk[Long]),
+      "id" -> ignored(None: Option[Long]),
       "name" -> nonEmptyText,
       "introduced" -> optional(date("yyyy-MM-dd")),
       "discontinued" -> optional(date("yyyy-MM-dd")),
@@ -48,10 +49,11 @@ object Application extends Controller {
    * @param filter Filter applied on computer names
    */
   def list(page: Int, orderBy: Int, filter: String) = Action { implicit request =>
-    Ok(html.list(
-      Computer.list(page = page, orderBy = orderBy, filter = ("%"+filter+"%")),
-      orderBy, filter
-    ))
+    Async {
+      Computer.list(page = page, orderBy = orderBy, filter = ("%" + filter + "%")).map { items =>
+        Ok(html.list(items, orderBy, filter))
+      }
+    }
   }
   
   /**
@@ -60,9 +62,18 @@ object Application extends Controller {
    * @param id Id of the computer to edit
    */
   def edit(id: Long) = Action {
-    Computer.findById(id).map { computer =>
-      Ok(html.editForm(id, computerForm.fill(computer), Company.options))
-    }.getOrElse(NotFound)
+    val computerFO = Computer.findById(id)
+    val companyOptionsF = Company.options
+    Async {
+      for {
+        computer <- computerFO;
+        companyOptions <- companyOptionsF
+      } yield {
+        computer.map { c =>
+          Ok(html.editForm(id, computerForm.fill(c), companyOptions))
+        }.getOrElse(NotFound)
+      }
+    }
   }
   
   /**
@@ -71,41 +82,55 @@ object Application extends Controller {
    * @param id Id of the computer to edit
    */
   def update(id: Long) = Action { implicit request =>
-    computerForm.bindFromRequest.fold(
-      formWithErrors => BadRequest(html.editForm(id, formWithErrors, Company.options)),
-      computer => {
-        Computer.update(id, computer)
-        Home.flashing("success" -> "Computer %s has been updated".format(computer.name))
-      }
-    )
+    withCompanyOptions { companyOptions =>
+      computerForm.bindFromRequest.fold(
+        formWithErrors => BadRequest(html.editForm(id, formWithErrors, companyOptions)),
+        computer => {
+          Computer.save(id, computer)
+          Home.flashing("success" -> "Computer %s has been updated".format(computer.name))
+        })
+    }
+  }
+
+  private def withCompanyOptions(f: (Seq[(String, String)]) => Result): AsyncResult = {
+    Async {
+      Company.options.map(f(_))
+    }
   }
   
   /**
    * Display the 'new computer form'.
    */
   def create = Action {
-    Ok(html.createForm(computerForm, Company.options))
+    withCompanyOptions(companyOptions => Ok(html.createForm(computerForm, companyOptions)))
   }
   
   /**
    * Handle the 'new computer form' submission.
    */
   def save = Action { implicit request =>
-    computerForm.bindFromRequest.fold(
-      formWithErrors => BadRequest(html.createForm(formWithErrors, Company.options)),
-      computer => {
-        Computer.insert(computer)
-        Home.flashing("success" -> "Computer %s has been created".format(computer.name))
-      }
-    )
+      computerForm.bindFromRequest.fold(
+        formWithErrors => withCompanyOptions(companyOptions => BadRequest(html.createForm(formWithErrors, companyOptions))),
+        computer => Async {
+          Computer.create(computer.name, computer.introduced, computer.discontinued, computer.companyId).map { c =>
+            Home.flashing("success" -> "Computer %s has been created".format(computer.name))
+          }
+        })
   }
   
   /**
    * Handle computer deletion.
    */
   def delete(id: Long) = Action {
-    Computer.delete(id)
-    Home.flashing("success" -> "Computer has been deleted")
+    Async {
+      Computer.findById(id).map{
+        case Some(computer) => {
+          computer.destroy()
+          Home.flashing("success" -> "Computer %s has been updated".format(computer.name))
+        }
+        case None => NotFound
+      }
+    }
   }
 
 }

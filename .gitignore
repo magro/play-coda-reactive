@@ -16,3 +16,4 @@ dist
 /.target
 .cache
 db/
+/bin

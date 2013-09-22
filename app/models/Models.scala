@@ -5,11 +5,16 @@ import java.util.{Date}
 import play.api.db._
 import play.api.Play.current
 
-import anorm._
-import anorm.SqlParser._
+import scalikejdbc._, async._, FutureImplicits._, SQLInterpolation._
+import scala.concurrent._
 
-case class Company(id: Pk[Long] = NotAssigned, name: String)
-case class Computer(id: Pk[Long] = NotAssigned, name: String, introduced: Option[Date], discontinued: Option[Date], companyId: Option[Long])
+case class Company(id: Long, name: String) extends ShortenedNames
+case class Computer(id: Option[Long] = None, name: String, introduced: Option[Date], discontinued: Option[Date], companyId: Option[Long]) extends ShortenedNames {
+
+  def save()(implicit session: AsyncDBSession = AsyncDB.sharedSession, cxt: EC = ECGlobal): Future[Computer] = Computer.save(id.get, this)(session, cxt)
+  def destroy()(implicit session: AsyncDBSession = AsyncDB.sharedSession, cxt: EC = ECGlobal): Future[Int] = Computer.destroy(id.get)(session, cxt)
+  
+}
 
 /**
  * Helper for pagination.
@@ -19,40 +24,36 @@ case class Page[A](items: Seq[A], page: Int, offset: Long, total: Long) {
   lazy val next = Option(page + 1).filter(_ => (offset + items.size) < total)
 }
 
-object Computer {
-  
-  // -- Parsers
-  
-  /**
-   * Parse a Computer from a ResultSet
-   */
-  val simple = {
-    get[Pk[Long]]("computer.id") ~
-    get[String]("computer.name") ~
-    get[Option[Date]]("computer.introduced") ~
-    get[Option[Date]]("computer.discontinued") ~
-    get[Option[Long]]("computer.company_id") map {
-      case id~name~introduced~discontinued~companyId => Computer(id, name, introduced, discontinued, companyId)
-    }
+object Computer extends SQLSyntaxSupport[Computer] with ShortenedNames {
+
+  override val columnNames = Seq("id", "name", "introduced", "discontinued", "company_id")
+
+  def apply(c: SyntaxProvider[Computer])(rs: WrappedResultSet): Computer = apply(c.resultName)(rs)
+  def apply(c: ResultName[Computer])(rs: WrappedResultSet): Computer = new Computer(
+    id = rs.longOpt(c.id),
+    name = rs.string(c.name),
+    introduced = rs.dateOpt(c.introduced),
+    discontinued = rs.dateOpt(c.discontinued),
+    companyId = rs.longOpt(c.companyId)
+  )
+
+  // join query with company table
+  def apply(cuterSP: SyntaxProvider[Computer], canySP: SyntaxProvider[Company])(rs: WrappedResultSet): (Computer, Option[Company]) = {
+    (apply(cuterSP.resultName)(rs), Some(Company(canySP)(rs)))
   }
-  
-  /**
-   * Parse a (Computer,Company) from a ResultSet
-   */
-  val withCompany = Computer.simple ~ (Company.simple ?) map {
-    case computer~company => (computer,company)
-  }
+
+  private val cuter = Computer.syntax("computer")
+  private val cany = Company.c
   
   // -- Queries
   
   /**
    * Retrieve a computer from the id.
    */
-  def findById(id: Long): Option[Computer] = {
-    DB.withConnection { implicit connection =>
-      SQL("select * from computer where id = {id}").on('id -> id).as(Computer.simple.singleOpt)
-    }
-  }
+  def findById(id: Long)(implicit session: AsyncDBSession = AsyncDB.sharedSession, cxt: EC = ECGlobal): Future[Option[Computer]] = withSQL {
+    select.from(Computer as cuter).where.eq(cuter.id, id)
+  }.map(Computer(cuter))
+
   
   /**
    * Return a page of (Computer,Company).
@@ -62,40 +63,27 @@ object Computer {
    * @param orderBy Computer property used for sorting
    * @param filter Filter applied on the name column
    */
-  def list(page: Int = 0, pageSize: Int = 10, orderBy: Int = 1, filter: String = "%"): Page[(Computer, Option[Company])] = {
+  def list(page: Int = 0, pageSize: Int = 10, orderBy: Int = 1, filter: String = "%")
+  	(implicit session: AsyncDBSession = AsyncDB.sharedSession, cxt: EC = ECGlobal): Future[Page[(Computer, Option[Company])]] = {
     
-    val offest = pageSize * page
+    val offset = pageSize * page
     
-    DB.withConnection { implicit connection =>
-      
-      val computers = SQL(
-        """
-          select * from computer 
-          left join company on computer.company_id = company.id
-          where computer.name like {filter}
-          order by {orderBy} nulls last
-          limit {pageSize} offset {offset}
-        """
-      ).on(
-        'pageSize -> pageSize, 
-        'offset -> offest,
-        'filter -> filter,
-        'orderBy -> orderBy
-      ).as(Computer.withCompany *)
-
-      val totalRows = SQL(
-        """
-          select count(*) from computer 
-          left join company on computer.company_id = company.id
-          where computer.name like {filter}
-        """
-      ).on(
-        'filter -> filter
-      ).as(scalar[Long].single)
-
-      Page(computers, page, offest, totalRows)
-      
-    }
+    val computers = withSQL {
+      select(cuter.*, cany.*).from(Computer as cuter).leftJoin(Company as cany).on(cuter.companyId, cany.id)
+      .where.like(cuter.name, filter)
+      .orderBy(cuter.id) // TODO: dynamic order?
+      .limit(pageSize).offset(offset)
+    }.map(Computer(cuter, cany)).list().future()
+    
+    val totalRows = withSQL {
+	    select(sqls.count).from(Computer as cuter).leftJoin(Company as cany).on(cuter.companyId, cany.id)
+	    .where.like(cuter.name, filter)
+	  }.map(rs => rs.long(1)).single.future.map(_.get)
+	  
+   for {
+     comps <- computers;
+     rows  <- totalRows
+   } yield Page(comps, page, offset, rows)
     
   }
   
@@ -105,45 +93,32 @@ object Computer {
    * @param id The computer id
    * @param computer The computer values.
    */
-  def update(id: Long, computer: Computer) = {
-    DB.withConnection { implicit connection =>
-      SQL(
-        """
-          update computer
-          set name = {name}, introduced = {introduced}, discontinued = {discontinued}, company_id = {company_id}
-          where id = {id}
-        """
-      ).on(
-        'id -> id,
-        'name -> computer.name,
-        'introduced -> computer.introduced,
-        'discontinued -> computer.discontinued,
-        'company_id -> computer.companyId
-      ).executeUpdate()
-    }
+  def save(id: Long, c: Computer)(implicit session: AsyncDBSession = AsyncDB.sharedSession, cxt: EC = ECGlobal): Future[Computer] = {
+    withSQL {
+      update(Computer).set(
+        column.name -> c.name,
+        column.introduced -> c.introduced,
+        column.discontinued -> c.discontinued,
+        column.companyId -> c.companyId
+      ).where.eq(column.id, c.id)
+    }.update.future.map(_ => c)
   }
   
   /**
    * Insert a new computer.
-   *
-   * @param computer The computer values.
    */
-  def insert(computer: Computer) = {
-    DB.withConnection { implicit connection =>
-      SQL(
-        """
-          insert into computer values (
-            (select next value for computer_seq), 
-            {name}, {introduced}, {discontinued}, {company_id}
-          )
-        """
-      ).on(
-        'name -> computer.name,
-        'introduced -> computer.introduced,
-        'discontinued -> computer.discontinued,
-        'company_id -> computer.companyId
-      ).executeUpdate()
-    }
+  def create(name: String, introduced: Option[Date] = None, discontinued: Option[Date] = None, companyId: Option[Long] = None)(
+    implicit session: AsyncDBSession = AsyncDB.sharedSession, cxt: EC = ECGlobal): Future[Computer] = {
+    for {
+      id <- withSQL {
+        insert.into(Computer).namedValues(
+          column.name -> name,
+          column.introduced -> introduced,
+          column.discontinued -> discontinued,
+          column.companyId -> companyId)
+          .returningId // if you run this example for MySQL, please remove this line
+      }.updateAndReturnGeneratedKey()
+    } yield Computer(id = Some(id), name = name, introduced = introduced, discontinued = discontinued, companyId = companyId)
   }
   
   /**
@@ -151,32 +126,36 @@ object Computer {
    *
    * @param id Id of the computer to delete.
    */
-  def delete(id: Long) = {
-    DB.withConnection { implicit connection =>
-      SQL("delete from computer where id = {id}").on('id -> id).executeUpdate()
-    }
+  def destroy(id: Long)(implicit session: AsyncDBSession = AsyncDB.sharedSession, cxt: EC = ECGlobal): Future[Int] = {
+    delete.from(Computer).where.eq(cuter.id, id)
   }
   
 }
 
-object Company {
-    
-  /**
-   * Parse a Company from a ResultSet
-   */
-  val simple = {
-    get[Pk[Long]]("company.id") ~
-    get[String]("company.name") map {
-      case id~name => Company(id, name)
-    }
-  }
+object Company extends SQLSyntaxSupport[Company] with ShortenedNames {
+  
+  override val columnNames = Seq("id", "name")
+
+  private[models] val c = Company.syntax("company")
+
+  def apply(c: SyntaxProvider[Company])(rs: WrappedResultSet): Company = apply(c.resultName)(rs)
+  def apply(c: ResultName[Company])(rs: WrappedResultSet): Company = new Company(
+    id = rs.long(c.id),
+    name = rs.string(c.name)
+  )
   
   /**
    * Construct the Map[String,String] needed to fill a select options set.
    */
-  def options: Seq[(String,String)] = DB.withConnection { implicit connection =>
-    SQL("select * from company order by name").as(Company.simple *).map(c => c.id.toString -> c.name)
+  def options()(implicit session: AsyncDBSession = AsyncDB.sharedSession, cxt: EC = ECGlobal): Future[Seq[(String,String)]] = {
+    sql"select ${c.result.*} from ${Company as c}".map(Company(c.resultName)).list.future().map{ comps => comps.map(comp => (comp.id.toString(), comp.name))}
   }
+  /*withSQL {
+    select.from(Company as c).orderBy(c.name)
+  }.map(Company(c)).list().map{ rs => (rs.long(c.id).toString(), rs.string(c.name)) }
+  */
+  // .map(x => (x.long(1), x.string(2)).list
+  // .map(foo => (rs: WrappedResultSet) => (rs.long(c.id).toString(), rs.string(c.name)))
   
 }
 
