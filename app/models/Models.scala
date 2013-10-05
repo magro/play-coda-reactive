@@ -34,7 +34,7 @@ object Computer extends SQLSyntaxSupport[Computer] with ShortenedNames {
   def apply(c: ResultName[Computer])(rs: WrappedResultSet): Computer = new Computer(
     id = rs.longOpt(c.id),
     name = rs.string(c.name),
-    introduced = rs.timestampOpt(c.introduced).map(_.toDateTime),
+    introduced = rs.dateTimeOpt(c.introduced),
     discontinued = rs.dateOpt(c.discontinued),
     companyId = rs.longOpt(c.companyId)
   )

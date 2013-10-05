@@ -12,6 +12,7 @@ object ApplicationBuild extends Build {
     	anorm,
     	// for evolutions
     	"postgresql" % "postgresql" % "9.1-901-1.jdbc4",
+        "com.github.seratch"  %% "scalikejdbc" % "[1.6.9,)",
         "com.github.seratch"  %% "scalikejdbc-async" % "[0.2,)",
         "com.github.seratch"  %% "scalikejdbc-async-play-plugin" % "[0.2,)",
         "com.github.mauricio" %% "postgresql-async"  % "[0.2,)",
