@@ -58,7 +58,7 @@
                         <tr>
                             <td><a href="@routes.Application.edit(computer.id.get)">@computer.name</a></td>
                             <td>
-                                @computer.introduced.map(_.format("dd MMM yyyy")).getOrElse { <em>-</em> }
+                                @computer.introduced.map(_.toString()).getOrElse { <em>-</em> }
                             </td>
                             <td>
                                 @computer.discontinued.map(_.format("dd MMM yyyy")).getOrElse { <em>-</em> }
