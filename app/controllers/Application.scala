@@ -28,7 +28,7 @@ object Application extends Controller {
     mapping(
       "id" -> ignored(None: Option[Long]),
       "name" -> nonEmptyText,
-      "introduced" -> optional(jodaDate("yyyy-MM-dd")),
+      "introduced" -> optional(jodaLocalDate("yyyy-MM-dd")),
       "discontinued" -> optional(date("yyyy-MM-dd")),
       "company" -> optional(longNumber)
     )(Computer.apply)(Computer.unapply)

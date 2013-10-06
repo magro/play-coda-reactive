@@ -8,10 +8,10 @@ import play.api.Play.current
 import scalikejdbc._, async._, FutureImplicits._, SQLInterpolation._
 import scala.concurrent._
 
-import org.joda.time.DateTime
+import org.joda.time.LocalDate
 
 case class Company(id: Long, name: String) extends ShortenedNames
-case class Computer(id: Option[Long] = None, name: String, introduced: Option[DateTime], discontinued: Option[Date], companyId: Option[Long]) extends ShortenedNames {
+case class Computer(id: Option[Long] = None, name: String, introduced: Option[LocalDate], discontinued: Option[Date], companyId: Option[Long]) extends ShortenedNames {
 
   def save()(implicit session: AsyncDBSession = AsyncDB.sharedSession, cxt: EC = ECGlobal): Future[Computer] = Computer.save(id.get, this)(session, cxt)
   def destroy()(implicit session: AsyncDBSession = AsyncDB.sharedSession, cxt: EC = ECGlobal): Future[Int] = Computer.destroy(id.get)(session, cxt)
@@ -34,7 +34,7 @@ object Computer extends SQLSyntaxSupport[Computer] with ShortenedNames {
   def apply(c: ResultName[Computer])(rs: WrappedResultSet): Computer = new Computer(
     id = rs.longOpt(c.id),
     name = rs.string(c.name),
-    introduced = rs.dateTimeOpt(c.introduced),
+    introduced = rs.localDateOpt(c.introduced),
     discontinued = rs.dateOpt(c.discontinued),
     companyId = rs.longOpt(c.companyId)
   )
@@ -110,7 +110,7 @@ object Computer extends SQLSyntaxSupport[Computer] with ShortenedNames {
   /**
    * Insert a new computer.
    */
-  def create(name: String, introduced: Option[DateTime] = None, discontinued: Option[Date] = None, companyId: Option[Long] = None)(
+  def create(name: String, introduced: Option[LocalDate] = None, discontinued: Option[Date] = None, companyId: Option[Long] = None)(
     implicit session: AsyncDBSession = AsyncDB.sharedSession, cxt: EC = ECGlobal): Future[Computer] = {
     for {
       id <- withSQL {
